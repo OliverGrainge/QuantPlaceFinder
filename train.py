@@ -6,7 +6,6 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from torch.optim import lr_scheduler
 
 import utils
-from dataloaders.QVPR import QVPR
 
 torch.set_float32_matmul_precision("medium")
 
@@ -114,23 +113,24 @@ if __name__ == "__main__":
         model_module = QVPRDistill(
             config["Training"]["GSVCities"],
             teacher_arch="DinoSalad",
-            student_backbone_arch=args.backbone_arch, 
+            student_backbone_arch=args.backbone_arch,
             student_agg_arch=args.agg_arch,
             student_out_dim=args.out_dim, 
-            batch_size=32, 
+            batch_size=args.batch_size, 
             image_size=(224,224),
             num_workers=args.num_workers,
             val_set_names=["pitts30k_val"], 
             max_epochs=args.max_epochs,
+            loss_type=args.loss_type
         )
 
         checkpoint_cb = ModelCheckpoint(
             monitor="pitts30k_val/float_R1",
             filename=f"{args.training_method.lower()}/"
+            + f"_{args.loss_type}/"
             + f"{args.backbone_arch.lower()}"
             + f"_{args.agg_arch.lower()}"
-            + f"_{args.loss_name}"
-            + f"_{args.miner_name}"
+            + f"_{args.loss_type}"
             + "_epoch({epoch:02d})_step({step:04d})_R1[{pitts30k_val/R1:.4f}]_R5[{pitts30k_val/R5:.4f}]",
             auto_insert_metric_name=False,
             save_weights_only=True,
@@ -164,6 +164,7 @@ if __name__ == "__main__":
             filename=f"{args.training_method.lower()}/"
             + f"{args.backbone_arch.lower()}"
             + f"_{args.agg_arch.lower()}"
+            + f"_{args.loss_type}"
             + "_epoch({epoch:02d})_step({step:04d})_R1[{pitts30k_val/R1:.4f}]_R5[{pitts30k_val/R5:.4f}]",
             auto_insert_metric_name=False,
             save_weights_only=True,
@@ -217,21 +218,21 @@ if __name__ == "__main__":
         enable_progress_bar=True,
         strategy="auto",
         accelerator="auto",
-        default_root_dir=f"./Logs/PreTraining/{args.training_method.lower()}/{args.backbone_arch.lower()}_{args.agg_arch.lower()}",
+        default_root_dir=f"./Logs/PreTraining/{args.training_method.lower()}/{args.backbone_arch.lower()}_{args.agg_arch.lower()}_{args.loss_type}",
         num_sanity_val_steps=0,
-        precision=args.precision,
+        precision="32",
         max_epochs=args.max_epochs,
         callbacks=[lr_monitor, checkpoint_cb],
         fast_dev_run=args.fast_dev_run,
-        limit_train_batches=(
-            int(
-                config["Training"]["EigenPlaces"]["iterations_per_epoch"]
-                * 32
-                / args.batch_size
-            )
-            if args.training_method.lower() == "eigenplaces"
-            else None
-        ),
+        #limit_train_batches=(
+        #    int(
+        #        config["Training"]["EigenPlaces"]["iterations_per_epoch"]
+        #        * 32
+        #        / args.batch_size
+        #    )
+        #    if args.training_method.lower() == "eigenplaces"
+        #    else None
+        #),
         #limit_train_batches=10,
     )
 

@@ -1,7 +1,7 @@
 
 Datasets:
-  #datasets_dir: "/mnt/datasets_drive/vpr_datasets"
-  datasets_dir: "/Users/olivergrainge/Documents/github/Datasets"
+  datasets_dir: "/mnt/datasets_drive/vpr_datasets"
+  #datasets_dir: "/Users/olivergrainge/Documents/github/Datasets"
   #datasets_dir: "/scratch/oeg1n18/datasets/vpr"
 
   
@@ -15,7 +15,7 @@ Training:
   accelerator: 'gpu'
   precision: bf16-mixed
   batch_size: 100 #416 for pretraining
-  max_epochs: 10
+  max_epochs: 20
   search_precision: 'float32'
   fast_dev_run: False
   freeze_n_blocks: 8
@@ -34,7 +34,7 @@ Training:
     lr: 0.0002
     weight_decay: 0.0
     momentum: 0.9
-    warmup_steps: 100 # 600
+    warmup_steps: 0 # 600
     milestones:
       - 30
       - 40

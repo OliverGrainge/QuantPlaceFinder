@@ -8,11 +8,60 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 from transformers import get_cosine_schedule_with_warmup
 from torchvision import transforms as T
+from pytorch_metric_learning import losses
 
 import utils
 from dataloaders.train.GSVCitiesDataset import GSVCitiesDataset
 
 from models.helper import get_model
+
+
+def sinkhorn_knopp(A, num_iters=100, tol=1e-5):
+    """
+    Applies the Sinkhorn-Knopp algorithm to transform A into a doubly stochastic matrix.
+
+    Args:
+        A (torch.Tensor): Input non-negative matrix of shape (n, n).
+        num_iters (int): Maximum number of iterations.
+        tol (float): Convergence tolerance.
+
+    Returns:
+        torch.Tensor: Doubly stochastic matrix.
+        bool: Convergence flag.
+    """
+    # Ensure A is non-negative
+    assert torch.all(A >= 0), "All elements of A must be non-negative."
+
+    # Initialize
+    D = A.clone()
+    n, m = D.shape
+    if n != m:
+        raise ValueError("Input matrix must be square.")
+
+    for i in range(num_iters):
+        # Row normalization
+        row_sum = D.sum(dim=1, keepdim=True)
+        # Avoid division by zero
+        row_sum = torch.where(row_sum == 0, torch.tensor(1.0, device=D.device), row_sum)
+        D = D / row_sum
+
+        # Column normalization
+        col_sum = D.sum(dim=0, keepdim=True)
+        # Avoid division by zero
+        col_sum = torch.where(col_sum == 0, torch.tensor(1.0, device=D.device), col_sum)
+        D = D / col_sum
+
+        # Check for convergence
+        row_diff = torch.abs(D.sum(dim=1) - 1.0).max()
+        col_diff = torch.abs(D.sum(dim=0) - 1.0).max()
+        if row_diff.item() < tol and col_diff.item() < tol:
+            print(f"Converged in {i+1} iterations.")
+            return D, True
+
+    print(f"Did not converge within {num_iters} iterations.")
+    return D, False
+
+
 
 IMAGENET_MEAN_STD = {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]}
 
@@ -29,7 +78,8 @@ class QVPRDistill(pl.LightningModule):
         num_workers=4,
         val_set_names=["pitts30k_val", "msls_val"],
         margin=0.1,
-        max_epochs=10
+        max_epochs=10,
+        loss_type="rel"
     ):
 
         super().__init__()
@@ -38,6 +88,7 @@ class QVPRDistill(pl.LightningModule):
         self.num_workers = num_workers
         self.val_set_names = val_set_names
         self.max_epochs = max_epochs
+        self.loss_type = loss_type
     
 
         self.lr = config["lr"]
@@ -106,6 +157,9 @@ class QVPRDistill(pl.LightningModule):
         self.miner = miners.MultiSimilarityMiner(
             epsilon=margin, distance=CosineSimilarity()
         )
+        self.task_loss_fn = losses.MultiSimilarityLoss(
+                alpha=1.0, beta=50, base=0.0, distance=CosineSimilarity()
+            )
         self.teacher = get_model(preset=teacher_arch)
         self.student = get_model(
             backbone_arch=student_backbone_arch,
@@ -128,46 +182,132 @@ class QVPRDistill(pl.LightningModule):
         a = F.normalize(a, dim=1, p=2)
         b = F.normalize(b, dim=1, p=2)
         return torch.diag(a @ b.t())
+    
+    @staticmethod 
+    def cosine_sim_mat(a, b):
+        a = F.normalize(a, dim=1, p=2)
+        b = F.normalize(b, dim=1, p=2)
+        return a @ b.t()
+    
+
+    def multisim_weights_vec(self, teacher_desc, student_desc, labels, alpha=1.0, beta=50.0, base=0.0):
+        miner_outputs = self.miner(student_desc, labels)
+        a1, pos, a2, neg = miner_outputs 
+        S = teacher_desc @ teacher_desc.t()
+        S = (S + 1) / 2  # Apply scaling
+        S_pos = S.clone()
+        S_neg = S.clone()
+        pos_mask = torch.zeros_like(S).type(torch.bool)
+        neg_mask = torch.zeros_like(S).type(torch.bool)
+        pos_mask[a1, pos] = True 
+        neg_mask[a2, neg] = True 
+
+        w = torch.zeros_like(S)
+        S_neg[~neg_mask] = float('-inf')
+        w[a2, neg] = torch.exp(beta * (S_neg[a2, neg] - base)) / (1 + torch.sum(torch.exp(beta * (S_neg[a2] - base)), dim=1))
+
+        S_pos[~pos_mask] = float('-inf')
+        w[a1, pos] = 1 / (torch.exp(-alpha * (base - S_pos[a1, pos])) + torch.sum(torch.exp(-alpha * (S_pos[a1] - S_pos[a1, pos][:, None])), dim=1))
+        w = w / w.max()
+        #w, _ = sinkhorn_knopp(w)
+        return w
+
+
+    def loss_fn_rel(self, teacher_desc, student_desc, labels):
+        teacher_rel = self.cosine_sim_mat(teacher_desc, teacher_desc)
+        student_rel = self.cosine_sim_mat(student_desc, student_desc)
+        loss = (teacher_rel - student_rel)**2 
+        loss = loss.sum() / student_rel.shape[0]
+        self.log("loss", loss)
+        return loss
+    
+    
+    def loss_fn_rel_weighted(self, teacher_desc, student_desc, labels): 
+        weights = self.multisim_weights_vec(teacher_desc, student_desc, labels)
+        teacher_rel = self.cosine_sim_mat(teacher_desc, teacher_desc) 
+        student_rel = self.cosine_sim_mat(student_desc, student_desc) 
+        loss = (teacher_rel - student_rel)**2 * weights
+        loss = loss.sum()
+        self.log("loss", loss)
+        return loss
+    
+    def loss_fn_rel_weighted_task_loss(self, teacher_desc, student_desc, labels):
+        weights = self.multisim_weights_vec(teacher_desc, student_desc, labels)
+        teacher_rel = self.cosine_sim_mat(teacher_desc, teacher_desc) 
+        student_rel = self.cosine_sim_mat(student_desc, student_desc) 
+        loss_rel = (teacher_rel - student_rel)**2 * weights
+        loss_rel = loss_rel.sum()
+        miner_outputs = self.miner(student_desc, labels)
+        loss_task = self.task_loss_fn(student_desc, labels, miner_outputs)
+        return loss_task + loss_rel
+    
+    def loss_fn_rel_task_loss(self, teacher_desc, student_desc, labels):
+        teacher_rel = self.cosine_sim_mat(teacher_desc, teacher_desc) 
+        student_rel = self.cosine_sim_mat(student_desc, student_desc) 
+        loss_rel = (teacher_rel - student_rel)**2
+        loss_rel = loss_rel.sum() / teacher_rel.shape[0]
+        miner_outputs = self.miner(student_desc, labels)
+        loss_task = self.task_loss_fn(student_desc, labels, miner_outputs)
+        return loss_task + loss_rel
+    
+    def loss_fn_rel_weighted_rel(self, teacher_desc, student_desc, labels): 
+        weights = self.multisim_weights_vec(teacher_desc, student_desc, labels)
+        teacher_rel = self.cosine_sim_mat(teacher_desc, teacher_desc) 
+        student_rel = self.cosine_sim_mat(student_desc, student_desc) 
+        loss = ((teacher_rel - student_rel)**2 * weights).sum()
+        loss2 = ((teacher_rel - student_rel)**2).sum() / (teacher_rel.shape[0] *2)
+        loss = loss + loss2
+        self.log("loss", loss)
+        return loss
+
+    def task_loss_function(self, descriptors, labels):
+        miner_outputs = self.miner(descriptors, labels)
+        loss = self.task_loss_fn(descriptors, labels, miner_outputs)
+        self.log("task_loss", loss)
+        return loss
 
     def training_step(self, batch, batch_idx):
         places, labels = batch
         BS, N, ch, h, w = places.shape
         images = places.view(BS * N, ch, h, w)
         labels = labels.view(-1)
-        student_desc = self.student(images)
-        teacher_desc = self.teacher(images)
-        miner_outputs = self.miner(teacher_desc, labels)
-        a1, p, a2, n = miner_outputs
-        teacher_pos_rel = self.cosine_sim_vec(teacher_desc[a1], teacher_desc[p])
-        teacher_neg_rel = self.cosine_sim_vec(teacher_desc[a2], teacher_desc[n])
-        student_pos_rel = self.cosine_sim_vec(student_desc[a1], student_desc[p])
-        student_neg_rel = self.cosine_sim_vec(student_desc[a2], student_desc[n])
-        teacher_rel = torch.cat((teacher_pos_rel, teacher_neg_rel))
-        student_rel = torch.cat((student_pos_rel, student_neg_rel))
-
-        loss = F.mse_loss(student_rel, teacher_rel)
-        self.log("loss", loss)
+        student_desc = F.normalize(self.student(images), dim=1, p=2)
+        if self.loss_type != "task":
+            teacher_desc = F.normalize(self.teacher(images), dim=1, p=2)
+            
+        if self.loss_type == "rel":
+            loss = self.loss_fn_rel(teacher_desc, student_desc, labels)
+        if self.loss_type == "task":
+            loss = self.task_loss_function(student_desc, labels)
+        if self.loss_type == "weighted_rel":
+            loss = self.loss_fn_rel_weighted(teacher_desc, student_desc, labels)
+        if self.loss_type == "weighted_rel_task":
+            loss = self.loss_fn_rel_weighted_task_loss(teacher_desc, student_desc, labels)
+        if self.loss_type == "rel_task":
+            loss = self.loss_fn_rel_task_loss(teacher_desc, student_desc, labels)
+        if self.loss_type == "rel_weighted_rel": 
+            loss = self.loss_fn_rel_weighted_rel(teacher_desc, student_desc, labels)
         return loss
     
     def configure_optimizers(self):
-        optimizer = optim.AdamW(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        optimizer = optim.Adam(
+            self.student.parameters(), lr=0.0002, weight_decay=0.0
         )
 
         # Compute total steps
-        steps_per_epoch = len(self.train_dataloader())
-        total_steps = steps_per_epoch * self.max_epochs
-        warmup_steps = steps_per_epoch * self.warmup_epochs
+        #steps_per_epoch = len(self.train_dataloader())
+        #total_steps = steps_per_epoch * self.max_epochs
+        #warmup_steps = steps_per_epoch * self.warmup_epochs
         # raise Exception
         # Scheduler
 
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps,
-        )
-        scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
-        return [optimizer], [scheduler]
+        #scheduler = get_cosine_schedule_with_warmup(
+        #    optimizer,
+        #    num_warmup_steps=warmup_steps,
+        #    num_training_steps=total_steps,
+        #)
+        #scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
+        return [optimizer]#, [scheduler]
 
     def setup(self, stage=None):
         # Setup for 'fit' or 'validate'self

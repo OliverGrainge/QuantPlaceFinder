@@ -6,9 +6,12 @@ import torch.nn as nn
 import yaml
 
 from dataloaders.ImageNet import ImageNet
+from dataloaders.GSVCities import GSVCities
 from models.helper import get_model
-from NeuroCompress.NeuroPress import freeze_model
 from parsers import get_args_parser
+import pytorch_lightning as pl 
+import yaml
+
 
 
 def measure_latency(model, input_tensor, num_runs=100, warmup_runs=10, verbose=True):
@@ -95,8 +98,49 @@ def eval_imagenet(args):
     trainer.test(module)
 
 
+def eval_vpr(args): 
+
+    model = get_model(
+        args.image_size,
+        args.backbone_arch,
+        args.agg_arch,
+        preset=args.preset,
+        out_dim=1000,
+        normalize_output=False,
+    )
+
+    with open("config.yaml", "r") as config_file:
+        config = yaml.safe_load(config_file)
+
+
+
+    model_module = GSVCities(
+        config["Training"]["GSVCities"], 
+        model=model,
+        batch_size=args.batch_size, 
+        shuffle_all=False, 
+        image_size=args.image_size,
+        num_workers=args.num_workers,
+        val_set_names=["pitts30k_val"],
+        search_precision="float32",
+    )
+
+    trainer = pl.Trainer(
+        enable_progress_bar=True, 
+        strategy="auto", 
+        accelerator="auto"
+    )
+
+    trainer.validate(model_module)
+
+
 if __name__ == "__main__":
     parser = get_args_parser()
     args = parser.parse_args()
 
-    eval_imagenet(args)
+    if "imagenet" in args.training_method.lower():
+        eval_imagenet(args)
+    elif "gsvcities" in args.training_method.lower():
+        eval_vpr(args)
+    else: 
+        raise Exception

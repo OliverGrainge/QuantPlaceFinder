@@ -85,7 +85,7 @@ def get_aggregator(agg_arch, features_dim, image_size, out_dim=1000):
     """
 
     if "gem" in agg_arch.lower():
-        return aggregators.GeM(out_dim=out_dim)
+        return aggregators.GeM(in_dim=features_dim[0], out_dim=out_dim)
 
     elif "convap" in agg_arch.lower():
         assert out_dim % 4 == 0

@@ -111,7 +111,8 @@ def training_arguments(parser=None):
     )
     parser.add_argument(
         "--image_size",
-        type=list,
+        type=int,
+        nargs=2,
         default=config["Training"]["image_size"],
         help="Size of the images (width, height)",
     )
@@ -134,6 +135,21 @@ def training_arguments(parser=None):
         type=str,
         default="MultiSimilarityMiner",
         help="choose the miner name",
+    )
+
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        default="rel",
+        help="choose the miner name",
+    )
+
+
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default=None,
+        help="choose the pretrained model",
     )
 
     return parser
