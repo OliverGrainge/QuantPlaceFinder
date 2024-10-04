@@ -67,9 +67,9 @@ Training:
      #- Medellin
      #- Minneapolis
      #- PRG # refers to Prague
-     #- WashingtonDC
+     - WashingtonDC
      #- Brussels
-     - London
+     #- London
      - Melbourne
      #- Osaka
      #- PRS # refers t

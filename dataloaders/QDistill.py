@@ -69,7 +69,7 @@ class QVPRDistill(pl.LightningModule):
     def __init__(
         self,
         config,
-        teacher_arch="DinoSalad",
+        teacher_arch="EigenPlaces",
         student_backbone_arch="vit_small",
         student_agg_arch="cls",
         student_out_dim=1024,
@@ -190,11 +190,13 @@ class QVPRDistill(pl.LightningModule):
         return a @ b.t()
     
 
-    def multisim_weights_vec(self, teacher_desc, student_desc, labels, alpha=1.0, beta=50.0, base=0.0):
+    def multisim_weights_vec(self, teacher_desc, student_desc, labels, alpha=1.0, beta=50.0, base=0.0, eps=0.1):
         miner_outputs = self.miner(student_desc, labels)
         a1, pos, a2, neg = miner_outputs 
+        #print("Pairs", a1.shape, pos.shape, a2.shape, neg.shape)
         S = teacher_desc @ teacher_desc.t()
-        S = (S + 1) / 2  # Apply scaling
+        #S = (S + 1) / 2  # Apply scaling
+        #print("Similarity matrix", S.min(), S.max())
         S_pos = S.clone()
         S_neg = S.clone()
         pos_mask = torch.zeros_like(S).type(torch.bool)
@@ -202,14 +204,22 @@ class QVPRDistill(pl.LightningModule):
         pos_mask[a1, pos] = True 
         neg_mask[a2, neg] = True 
 
-        w = torch.zeros_like(S)
+        w = torch.zeros_like(S) + eps
+        #print("Weight Matrix", w.min(), w.max())
         S_neg[~neg_mask] = float('-inf')
         w[a2, neg] = torch.exp(beta * (S_neg[a2, neg] - base)) / (1 + torch.sum(torch.exp(beta * (S_neg[a2] - base)), dim=1))
 
         S_pos[~pos_mask] = float('-inf')
         w[a1, pos] = 1 / (torch.exp(-alpha * (base - S_pos[a1, pos])) + torch.sum(torch.exp(-alpha * (S_pos[a1] - S_pos[a1, pos][:, None])), dim=1))
-        w = w / w.max()
+        #print("Weight Matrix", w.min(), w.max())
+        #w = w / w.max()
+        #import matplotlib.pyplot as plt 
+        #plt.imshow(w.float().detach().cpu())
+        #plt.show()
         #w, _ = sinkhorn_knopp(w)
+        #import matplotlib.pyplot as plt 
+        #plt.imshow(w.float().detach().cpu())
+        #plt.show()
         return w
 
 
@@ -220,7 +230,6 @@ class QVPRDistill(pl.LightningModule):
         loss = loss.sum() / student_rel.shape[0]
         self.log("loss", loss)
         return loss
-    
     
     def loss_fn_rel_weighted(self, teacher_desc, student_desc, labels): 
         weights = self.multisim_weights_vec(teacher_desc, student_desc, labels)
@@ -248,18 +257,40 @@ class QVPRDistill(pl.LightningModule):
         loss_rel = loss_rel.sum() / teacher_rel.shape[0]
         miner_outputs = self.miner(student_desc, labels)
         loss_task = self.task_loss_fn(student_desc, labels, miner_outputs)
-        return loss_task + loss_rel
+        #print(0.05 * loss_rel.item(), loss_task.item())
+        return loss_task + (0.05 * loss_rel)
     
-    def loss_fn_rel_weighted_rel(self, teacher_desc, student_desc, labels): 
-        weights = self.multisim_weights_vec(teacher_desc, student_desc, labels)
+    def loss_fn_rel_mse_task_loss(self, teacher_desc, student_desc, labels):
         teacher_rel = self.cosine_sim_mat(teacher_desc, teacher_desc) 
         student_rel = self.cosine_sim_mat(student_desc, student_desc) 
-        loss = ((teacher_rel - student_rel)**2 * weights).sum()
-        loss2 = ((teacher_rel - student_rel)**2).sum() / (teacher_rel.shape[0] *2)
-        loss = loss + loss2
-        self.log("loss", loss)
-        return loss
+        loss_rel = (teacher_rel - student_rel)**2
+        loss_rel = loss_rel.sum() / teacher_rel.shape[0]
+        S = teacher_desc @ student_desc.t()
+        D = 1 - ((S+1)/2)
+        D_squared = D**2
+        loss_mse = torch.trace(D_squared)/teacher_desc.shape[0]
+        miner_outputs = self.miner(student_desc, labels)
+        loss_task = self.task_loss_fn(student_desc, labels, miner_outputs)
+        #print(loss_mse, 0.05 * loss_rel.item(), loss_task.item())
+        return loss_task + (0.05 * loss_rel)
+    
 
+    
+    def loss_fn_mse_task_loss(self, teacher_desc, student_desc, labels):
+        S = teacher_desc @ student_desc.t()
+        D = 1 - ((S + 1)/2)
+        D_squared = D**2 
+        loss_mse = torch.trace(D_squared) / teacher_desc.shape[0]
+        miner_outputs = self.miner(student_desc, labels)
+        loss_task = self.task_loss_fn(student_desc, labels, miner_outputs)
+        return loss_mse
+    
+    def loss_fn_mse(self, teacher_desc, student_desc, labels):
+        S = teacher_desc @ student_desc.t()
+        D = 1 - ((S + 1)/2)
+        loss = torch.trace(D**2)/teacher_desc.shape[0]
+        return loss
+        
     def task_loss_function(self, descriptors, labels):
         miner_outputs = self.miner(descriptors, labels)
         loss = self.task_loss_fn(descriptors, labels, miner_outputs)
@@ -287,6 +318,12 @@ class QVPRDistill(pl.LightningModule):
             loss = self.loss_fn_rel_task_loss(teacher_desc, student_desc, labels)
         if self.loss_type == "rel_weighted_rel": 
             loss = self.loss_fn_rel_weighted_rel(teacher_desc, student_desc, labels)
+        if self.loss_type == "mse": 
+            loss = self.loss_fn_mse(teacher_desc, student_desc, labels)
+        if self.loss_type == "task_mse": 
+            loss = self.loss_fn_mse_task_loss(teacher_desc, student_desc, labels)
+        if self.loss_type == "task_mse_rel": 
+            loss = self.loss_fn_rel_mse_task_loss(teacher_desc, student_desc, labels)
         return loss
     
     def configure_optimizers(self):
@@ -295,18 +332,17 @@ class QVPRDistill(pl.LightningModule):
         )
 
         # Compute total steps
-        #steps_per_epoch = len(self.train_dataloader())
-        #total_steps = steps_per_epoch * self.max_epochs
-        #warmup_steps = steps_per_epoch * self.warmup_epochs
-        # raise Exception
+        steps_per_epoch = len(self.train_dataloader())
+        total_steps = steps_per_epoch * self.max_epochs
+        warmup_steps = steps_per_epoch * self.warmup_epochs
         # Scheduler
 
-        #scheduler = get_cosine_schedule_with_warmup(
-        #    optimizer,
-        #    num_warmup_steps=warmup_steps,
-        #    num_training_steps=total_steps,
-        #)
-        #scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+        )
+        scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
         return [optimizer]#, [scheduler]
 
     def setup(self, stage=None):

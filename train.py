@@ -112,7 +112,7 @@ if __name__ == "__main__":
     if "qdistill" in args.training_method.lower(): 
         model_module = QVPRDistill(
             config["Training"]["GSVCities"],
-            teacher_arch="DinoSalad",
+            teacher_arch="EigenPlaces",
             student_backbone_arch=args.backbone_arch,
             student_agg_arch=args.agg_arch,
             student_out_dim=args.out_dim, 
@@ -220,7 +220,7 @@ if __name__ == "__main__":
         accelerator="auto",
         default_root_dir=f"./Logs/PreTraining/{args.training_method.lower()}/{args.backbone_arch.lower()}_{args.agg_arch.lower()}_{args.loss_type}",
         num_sanity_val_steps=0,
-        precision="32",
+        precision="bf16-true",
         max_epochs=args.max_epochs,
         callbacks=[lr_monitor, checkpoint_cb],
         fast_dev_run=args.fast_dev_run,
